@@ -76,12 +76,54 @@ rows label 4 ke taur par (jo cotton jaisi lagti hain wo nikal di gayin).
 
 Codes: cotton=1, rice=2, cane=3, other=4, fall_maize=5, orchard=6. Cotton hamesha 1.
 
-## 7. Abhi kya chal raha hai
+## 7. v2 ka nateeja — map level, sieve ke baad
 
-`train_chain.sh`: v2 train (search skip, v1 ke params) → curves par v1/v2 compare →
-cached tiles se v2 ke maps → un maps ko score.
+| AOI | recall v1→v2 | rice | cane | orchard |
+|---|---|---|---|---|
+| Al-Moiz-2-1 | 89.6 → **92.0** | — | 13.0 → **9.9** | 5.0 → **4.1** |
+| Baba-Fareed-1 | 81.8 → **83.2** | 7.2 → **4.1** | 1.9 → 3.0 | — |
+| Baba-Fareed-2 | 73.1 → **81.6** | 20.0 → **12.3** | 3.5 → 6.9 | — |
+| Faran-1 | 57.3 → **78.6** | 9.9 → 21.6 | 0.7 → 1.9 | 5.8 → 13.3 |
+| Layyah-1 | 76.1 → **81.6** | 6.6 → **4.6** | 1.9 → 5.1 | — |
+| Layyah-orchards | 70.8 → **78.5** | — | 3.8 → 4.4 | 1.3 → 1.8 |
 
-## 8. Raftaar ke faisle
+Recall har jagah barha, sab se kam ab 78.5 (tha 57.3). Rice teen jagah kam hua.
+Faran akela ulta chala.
+
+Model v2 held-out (67 grids jo training mein thay hi nahi): cotton precision 0.924,
+recall 0.872. Rice precision 0.692 — crops mein sab se kamzor.
+
+## 8. 'other' class — do experiments, dono ka jawab
+
+- **Nikal dena: ghalat.** Recall +2.3 lekin rice +1.7, cane +0.9, orchard +2.0.
+  Ganda hone ke bawajood wo class apna kaam kar rahi hai.
+- **Saaf karna: bemani.** Cleaner ne 17,305 mein se 9,561 rows apni asli class mein
+  bhej deen (849 cotton, 1,619 rice, 6,089 orchard). Nateeja: pooled recall 83.1 → 83.3,
+  rice 12.0 → 12.3. Sab shor ke andar. **v2 sada 'other' ke saath hi rahega.**
+
+## 9. Faran / Sindh — faisla user ka, lekin ab jeet ka raasta maujood hai
+
+`validation_runs/threshold_sweep.csv` — 6 AOIs, 7 cuts. Faran-1 par:
+
+| cut | recall | rice | orchard |
+|---|---|---|---|
+| 0.5 | 73.5 | 15.4 | 6.4 |
+| **0.6** | **67.6** | **10.5** | **4.7** |
+| 0.7 | 60.1 | 7.1 | 2.5 |
+
+v1 wahan 59.4 recall / 11.9 rice deta tha. **v2 at cut 0.6 = 67.6 / 10.5 — dono taraf
+behtar.** Koi trade-off nahi, sidha faida. Tajweez: Sindh mein cut 0.6, Punjab mein
+argmax. **Number user ne dena hai.**
+
+Sweep ke numbers argmax se neeche hain kyunki argmax cotton chun leta hai chahe uski
+probability 0.5 se kam ho, agar baqi sab us se bhi kam hon.
+
+## 10. Orchard mask
+
+v2 maps par: Faran-1 1.3%, Layyah-orchards 1.2%, Al-Moiz 0.0% (wahan sirf 21 blocks).
+Chhota hai lekin muft, aur wo acres pakke ghalat hain. Lagana chahiye.
+
+## 12. Raftaar ke faisle
 
 2 core hain. Optuna search 12 trials × 3 folds tqareeban ek ghanta le raha tha, is liye
 pehle model ke liye skip kar diya. Har class 45,000 rows par cap — cane cotton se aath
@@ -91,13 +133,7 @@ Sab kuch `gs://farmdar_data_catalog/fao_cotton_scanner_cache/` mein cache hota h
 Sentinel tiles wahi cheez hain jo mehngi hain; model ya window badalne par dobara download
 nahi karna parta.
 
-## 9. Khula sawal — user se poochna hai
-
-Faran-1 ka recall 57.3%, baqi 73 se 90. Sindh mein cotton pehle boya jata hai. Agar v2 ise
-theek na kar saka to Punjab aur Sindh ke alag models chahiye ya nahi — **ye domain faisla
-hai, khud nahi karna.**
-
-## 10. Rules
+## 11. Rules
 
 - Roman Urdu, chhota aur seedha.
 - Commits `dawoodahamd.spsc@gmail.com` ke naam se, Claude ke naam se nahi.
