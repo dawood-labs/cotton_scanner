@@ -54,17 +54,35 @@ ko known non-cotton ke taur par use kar rahe hain.
 - Validation data GCS se local: `FAO/cotton/validation_data/`.
 - 5 per-mill AOIs: `FAO/cotton/validation_data/aois/*.gpkg`.
 
-## 5. Abhi kya chal raha hai
+## 5. Validation ka tareeqa
 
-`scripts/run_validation.sh` — 5 AOIs sequential, output `FAO/cotton/validation_runs/`.
-Order: al_moiz_2_1, baba_fareed_1, baba_fareed_2, faran_1, layyah_1.
-Box par sirf 2 core hain, isliye sequential.
+Ground truth cotton-only hai, is se sirf **recall** milta hai. Precision ke liye
+rice / fall-maize / sugarcane scans aur orchard mask ko known non-cotton maan kar
+**per-crop commission** nikalte hain: us crop ke kitne pixels model ne cotton keh diya.
+Dono cheezein sieved classification raster par, 10 m grid par.
+
+6 AOIs: paanch mill wale + `layyah_orchards`. Aakhri wala khud banaya — Layyah district
+ke andar wo 0.24 deg square jahan orchard blocks aur surveyed cotton dono sab se zyada
+hain (1005 orchard feats / 6,470 acres, 560 cotton feats / 1,301 acres). Paanch mill AOIs
+mein itne orchards nahi thay ke wo confusion test ho sake.
+
+Pehle do AOIs ke numbers (date fix ke baad), % = us class ke kitne pixels cotton mape:
+
+| AOI | cotton (recall) | rice | sugarcane | fall maize | orchard |
+|---|---|---|---|---|---|
+| Al-Moiz-2-1 | 89.6 | — | 13.0 | — | 5.0 |
+| Baba-Fareed-1 | 81.8 | 7.2 | 1.9 | 1.1 | — |
+
+Al-Moiz-2-1 training se contaminated hai (BUG-2), is ka 89.6 optimistic hai.
 
 ## 6. Agla qadam
 
-1. Runs khatam hone par per-mill recall + reference-crop false positive rate.
-2. Rice / cane / orchard confusion ka pixel-level analysis.
-3. Orchard mask lagana.
+1. Baqi 4 AOIs ke scores.
+2. `ab_window_shift.py` — purane shifted window se A/B, taake bug ki qeemat inhi
+   scores mein dikhe.
+3. Reference curves ka plot: rice / orchard cotton ke oopar baithti hai ya alag hai.
+   Isi se tay hoga ke masla signal mein hai ya training set mein.
+4. Orchard mask lagane ka faisla — user se poochna hai.
 
 ## 7. Rules
 
