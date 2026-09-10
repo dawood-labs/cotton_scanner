@@ -225,7 +225,28 @@ def cv_folds(y: np.ndarray, groups: np.ndarray, requested: int) -> int:
     return max(2, min(requested, n_groups, smallest_class))
 
 
+# What v1's own search settled on. Used when the search is skipped, so a first model
+# lands in minutes instead of an hour on two cores and tuning can come after there is
+# something to tune against.
+DEFAULT_PARAMS = {"n_estimators": 250, "max_depth": 30, "min_samples_leaf": 1,
+                  "min_samples_split": 2, "max_features": "sqrt"}
+
+
+class FixedStudy:
+    """Stands in for an optuna study when --n-trials is 0, so the rest of the run and
+    everything it writes stays identical."""
+
+    def __init__(self, params):
+        self.best_params = dict(params)
+        self.best_value = float("nan")
+        self.trials = []
+
+
 def tune(X, y, groups, n_trials: int, n_jobs: int, seed: int, folds: int):
+    if n_trials <= 0:
+        log.info("search skipped, using %s", DEFAULT_PARAMS)
+        return FixedStudy(DEFAULT_PARAMS)
+
     splitter = StratifiedGroupKFold(n_splits=folds, shuffle=True, random_state=seed)
     fold_index = list(splitter.split(X, y, groups))
 
@@ -310,6 +331,10 @@ def main():
                         help="old training set; its non-cotton rows become label 4")
     parser.add_argument("--no-old-negatives", action="store_true",
                         help="train on the polygon-scanned classes only")
+    parser.add_argument("--max-per-class", type=int, default=None,
+                        help="cap rows per class before splitting. Sugarcane outnumbers "
+                             "cotton eight to one, and the extra rows buy nothing but "
+                             "hours of fitting on two cores.")
     parser.add_argument("--max-other", type=int, default=None,
                         help="cap on label-4 rows drawn from the old set")
     parser.add_argument("--reference-curves", type=Path, default=REFERENCE_CURVES,
@@ -335,6 +360,15 @@ def main():
         if len(other):
             log.info("merging %d generic non-crop rows from the old set as label 4", len(other))
             df = pd.concat([df, other], ignore_index=True)
+
+    if args.max_per_class:
+        # Capped per class. The group split happens after this, so a whole tile can still
+        # land in the holdout; what the cap removes is redundancy, not independence.
+        before = len(df)
+        df = (df.groupby("label", group_keys=False)
+                .apply(lambda g: g.sample(min(len(g), args.max_per_class), random_state=args.seed))
+                .reset_index(drop=True))
+        log.info("capped at %d rows per class: %d rows -> %d", args.max_per_class, before, len(df))
 
     counts = df["label"].value_counts().sort_index()
     for code, count in counts.items():

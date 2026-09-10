@@ -42,7 +42,9 @@ def classification_raster(aoi_dir: Path) -> Path:
 
 def score_one(slug: str) -> pd.DataFrame:
     raster_path = classification_raster(RUNS / slug)
-    ref_path = REFS / f"{slug}.gpkg"
+    # A rerun under a different model lives at "<aoi>__<tag>" but is scored against the
+    # same AOI's reference layer, which is the whole point of running it.
+    ref_path = REFS / f"{slug.split('__')[0]}.gpkg"
     refs = gpd.read_file(ref_path)
 
     with rasterio.open(raster_path) as src:
@@ -85,7 +87,8 @@ def score_one(slug: str) -> pd.DataFrame:
 
 
 def main(slugs):
-    frames = [score_one(s) for s in slugs if (RUNS / s).exists() and (REFS / f"{s}.gpkg").exists()]
+    frames = [score_one(s) for s in slugs
+              if (RUNS / s).exists() and (REFS / f"{s.split('__')[0]}.gpkg").exists()]
     if not frames:
         print("nothing scored yet")
         return
