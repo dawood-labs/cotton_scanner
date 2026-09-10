@@ -15,6 +15,10 @@ import pandas as pd
 
 BASE = Path("/home/jovyan/FAO/cotton")
 AOIS = BASE / "validation_data/cotton_val_aois/cotton_val_aois.shp"
+# An extra AOI built for this work rather than supplied: the densest overlap of orchard
+# blocks and surveyed cotton inside Layyah district. Orchards carry a cotton-like NDVI
+# curve, and none of the five mill AOIs contains enough of them to test that.
+EXTRA_AOIS = BASE / "validation_data/aois/layyah_orchards.gpkg"
 OUT = BASE / "validation_data/reference_crops"
 
 SOURCES = {
@@ -29,6 +33,7 @@ COTTON_GT = {
     "Baba-Fareed-2": "validation_data/Baba-Fareed-Cotton-2025/Baba-Fareed-Cotton-2025.shp",
     "Faran-1": "validation_data/Faran-Cotton-2025/Faran-Cotton-2025.shp",
     "Layyah-1": "validation_data/Layyah-Cotton-2025/Layyah-Cotton-2025.shp",
+    "Layyah-orchards": "validation_data/Layyah-Cotton-2025/Layyah-Cotton-2025.shp",
 }
 
 
@@ -47,6 +52,12 @@ def clip_to(path, geom, bounds, label):
         print(f"    {label}: 0", flush=True)
         return None
     part = part.to_crs(4326)
+    # The national scans carry self-intersecting rings that make GEOS refuse the clip.
+    # make_valid is the cheapest repair that keeps the polygon where it was.
+    invalid = ~part.geometry.is_valid
+    if invalid.any():
+        part.loc[invalid, "geometry"] = part.loc[invalid, "geometry"].make_valid()
+        part = part[part.geometry.geom_type.isin(("Polygon", "MultiPolygon"))]
     part = gpd.clip(part, geom)
     part = part[~part.geometry.is_empty & part.geometry.notna()]
     if part.empty:
@@ -62,6 +73,8 @@ def clip_to(path, geom, bounds, label):
 def main(only=None):
     OUT.mkdir(parents=True, exist_ok=True)
     aois = gpd.read_file(AOIS)
+    if EXTRA_AOIS.exists():
+        aois = pd.concat([aois, gpd.read_file(EXTRA_AOIS)], ignore_index=True)
     for _, row in aois.iterrows():
         mill = row["mill"]
         if only and slug(mill) not in only:
