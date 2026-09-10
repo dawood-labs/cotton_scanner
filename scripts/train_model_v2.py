@@ -331,6 +331,9 @@ def main():
                         help="old training set; its non-cotton rows become label 4")
     parser.add_argument("--no-old-negatives", action="store_true",
                         help="train on the polygon-scanned classes only")
+    parser.add_argument("--extra-labelled", type=Path, default=None,
+                        help="another table in the labelled_pixels schema to merge, e.g. "
+                             "the rebuilt 'other' class. Replaces --old-csv when given.")
     parser.add_argument("--max-per-class", type=int, default=None,
                         help="cap rows per class before splitting. Sugarcane outnumbers "
                              "cotton eight to one, and the extra rows buy nothing but "
@@ -354,7 +357,19 @@ def main():
 
     df = load_labelled(args.labelled)
     log.info("loaded %d rows over %d tiles", len(df), df["tile"].nunique())
-    if not args.no_old_negatives:
+    if args.extra_labelled:
+        # Already in the labelled_pixels schema, already cleaned: merge it as it is rather
+        # than putting it back through the old-CSV path, which would filter on a column
+        # this table does not have.
+        extra = pd.read_parquet(args.extra_labelled)
+        check_feature_columns(extra.columns, str(args.extra_labelled))
+        if args.max_other:
+            extra = (extra.groupby("label", group_keys=False)
+                     .apply(lambda g: g.sample(min(len(g), args.max_other), random_state=args.seed))
+                     .reset_index(drop=True))
+        log.info("merging %d rows from %s", len(extra), args.extra_labelled)
+        df = pd.concat([df, extra], ignore_index=True)
+    elif not args.no_old_negatives:
         curves = args.reference_curves if args.reference_curves.exists() else None
         other = load_old_negatives(args.old_csv, args.max_other, args.seed, curves)
         if len(other):
