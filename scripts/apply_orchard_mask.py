@@ -26,7 +26,8 @@ DEFAULT_MASK = Path("/home/jovyan/FAO/cotton/validation_data/orchard_exclusion_m
 
 
 def apply_mask(raster_path: Path, mask_path: Path, out_path: Path,
-               cotton_class: int, background_class: int, nodata: int) -> dict:
+               cotton_class: int, background_class: int, nodata: int,
+               aoi_path: Path | None = None) -> dict:
     with rasterio.open(raster_path) as src:
         profile = src.profile.copy()
         classes = src.read(1)
@@ -34,7 +35,19 @@ def apply_mask(raster_path: Path, mask_path: Path, out_path: Path,
 
     blocks = gpd.read_file(mask_path, bbox=tuple(bounds))
     is_cotton = classes == cotton_class
-    before = int(is_cotton.sum())
+
+    # The classification raster covers the whole 0.1 degree tile grid, which overhangs the
+    # AOI -- on Faran-1 that is 11,679 raster acres against 3,278 inside the AOI. Counting
+    # the overhang would make the mask look like it removed far less than it did.
+    if aoi_path is not None:
+        from rasterio.features import geometry_mask
+        aoi = gpd.read_file(aoi_path).to_crs(crs)
+        scored = geometry_mask(aoi.geometry, out_shape=classes.shape,
+                               transform=transform, invert=True)
+    else:
+        scored = np.ones(classes.shape, dtype=bool)
+
+    before = int((is_cotton & scored).sum())
 
     if blocks.empty:
         removed = 0
@@ -49,8 +62,8 @@ def apply_mask(raster_path: Path, mask_path: Path, out_path: Path,
             all_touched=True,
         ).astype(bool)
         hit = is_cotton & orchard
-        removed = int(hit.sum())
-        classes[hit] = background_class
+        removed = int((hit & scored).sum())
+        classes[hit] = background_class          # masked everywhere, counted inside the AOI
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     profile.update(compress="lzw", tiled=True, blockxsize=256, blockysize=256, bigtiff="YES")
@@ -79,6 +92,8 @@ def main():
     parser.add_argument("--cotton-class", type=int, default=1)
     parser.add_argument("--background-class", type=int, default=4)
     parser.add_argument("--nodata", type=int, default=255)
+    parser.add_argument("--aoi", type=Path, default=None,
+                        help="count acres inside this AOI only; the raster overhangs it")
     parser.add_argument("--suffix", default="_orchard_masked")
     args = parser.parse_args()
 
@@ -86,7 +101,7 @@ def main():
         out = raster.parent / f"{raster.stem}{args.suffix}{raster.suffix}"
         print(raster.name)
         apply_mask(raster, args.mask, out, args.cotton_class,
-                   args.background_class, args.nodata)
+                   args.background_class, args.nodata, args.aoi)
     return 0
 
 
