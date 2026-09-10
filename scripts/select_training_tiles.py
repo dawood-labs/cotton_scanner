@@ -17,9 +17,21 @@ Validation leak. Any cell touching a validation AOI (plus a 0.02 deg margin, sin
 Sentinel tile is snapped to the pixel grid and does not land exactly on the cell edge) is
 dropped outright. BUG-2 in CONTEXT.md is what happens when that is not done.
 
+Negatives are looked for somewhere else entirely. This is a per-pixel classifier, so a
+rice pixel teaches the model what rice looks like regardless of whether cotton grows in
+the same cell -- co-occurrence only buys shared atmosphere and shared acquisition dates,
+which is second order. Cells scored for cotton therefore miss the ones that matter most:
+those thick with rice and fall maize and holding no cotton at all. So the grid is
+extended a second time over the rice and fall-maize scans' own extents, and ranked on
+rice and maize acreage alone.
+
 Output: training_tiles.gpkg, with a `batch` column. The pilot batch is the six cells we
-acquire first; the extension batch is ranked and waiting.
+acquire first; the extension batch is ranked and waiting; the negatives batch is the
+rice/maize supply, independent of both.
 """
+import argparse
+import os
+import sys
 import warnings
 from pathlib import Path
 
@@ -73,6 +85,27 @@ PILOT_SIZE = 6
 PILOT_MIN_SINDH = 2
 PILOT_MAX_SINDH = 3
 PILOT_REQUIRED = ("cotton", "rice", "sugarcane", "orchard")
+
+# Latitude alone gets the province wrong exactly where it matters. Rahim Yar Khan is
+# Punjab but reaches below 28.5, so the proxy called a Punjab cell Sindh and the rice
+# batch ended up entirely in Punjab. The orchard mask carries a real province attribute
+# for 20 districts; where a cell touches one, that wins over the proxy.
+SINDH_CERTAIN_LAT = 28.0   # unambiguous Sindh, used only to guarantee a Sindh shortlist
+
+NEGATIVE_CLASSES = ("rice", "fall_maize")
+N_NEGATIVES = 4
+NEG_SHORTLIST = 40
+NEG_SHORTLIST_SINDH = 20   # ...plus this many from below SINDH_CERTAIN_LAT, so the
+                           # Sindh-first pick below has a pool to draw from at all
+NEG_MIN_ACRES = 200.0      # a cell worth a download must carry a real block of the crop
+# Wide, because these four are the whole rice/maize supply. Five cells is ~55 km, far
+# enough that no two share a district or a sowing week.
+NEG_SEPARATION = 5
+NATIONAL_CHUNK_DEG = 2.0   # bbox-read stride over the national scans
+# Walking both national scans takes ~15 minutes, and nothing downstream of it changes
+# when the ranking rules do. Cached so re-runs are seconds; delete the file or pass
+# --refresh after the scans themselves change.
+NATIONAL_CACHE = BASE / "training_v2/tiles/national_cell_acres.parquet"
 
 
 def snap_out(bounds):
@@ -159,6 +192,149 @@ def cheap_pass():
         print(f"  {label}: {sum(len(g) for g in cache[label].values()):,} features in range", flush=True)
 
     return counts, cache, regions, districts
+
+
+def national_acres(label: str):
+    """Per-cell acreage for one national scan over its whole extent, read in strides.
+
+    The scan is never opened whole -- pyogrio reports its extent from the header, and the
+    file is then walked in NATIONAL_CHUNK_DEG blocks through its spatial index. A polygon
+    straddling a block edge is returned by both reads, so each block keeps only the
+    polygons whose centroid falls inside it; that is the same rule the cell counting uses,
+    so nothing is counted twice and nothing is lost.
+    """
+    import pyogrio
+
+    path = BASE / OTHER_SOURCES[label]
+    minx, miny, maxx, maxy = pyogrio.read_info(path)["total_bounds"]
+    counts = {}
+    xs = np.arange(np.floor(minx), np.ceil(maxx), NATIONAL_CHUNK_DEG)
+    ys = np.arange(np.floor(miny), np.ceil(maxy), NATIONAL_CHUNK_DEG)
+    for x0 in xs:
+        for y0 in ys:
+            x1, y1 = x0 + NATIONAL_CHUNK_DEG, y0 + NATIONAL_CHUNK_DEG
+            gdf = read_bbox(OTHER_SOURCES[label], (x0, y0, x1, y1))
+            if gdf.empty:
+                continue
+            centroids = gdf.geometry.centroid
+            cx, cy = centroids.x.values, centroids.y.values
+            own = (cx >= x0) & (cx < x1) & (cy >= y0) & (cy < y1)
+            if not own.any():
+                continue
+            gdf, cx, cy = gdf[own], cx[own], cy[own]
+            area = acres(gdf).values
+            ci, cj = cell_of(cx, cy)
+            for (i, j), part in pd.DataFrame({"i": ci, "j": cj, "acres": area}).groupby(["i", "j"]):
+                counts[(i, j)] = counts.get((i, j), 0.0) + float(part.acres.sum())
+    print(f"  {label}: {len(counts):,} cells over its own extent", flush=True)
+    return counts
+
+
+def exact_cell(i, j):
+    """Exact clipped acreage for one cell, read straight from the sources.
+
+    Used for the negatives, which sit outside the cotton regions the cheap pass cached.
+    A 0.1 deg bbox through a shapefile index is a few hundred milliseconds, so reading
+    per cell is cheaper than caching a country.
+    """
+    geom = cell_box(i, j)
+    bounds = geom.bounds
+    row = {"i": i, "j": j, "geometry": geom,
+           "lon": (i + 0.5) * CELL_DEG, "lat": (j + 0.5) * CELL_DEG,
+           "district": "", "orchard_province": ""}
+    for label in CLASSES:
+        paths = list(COTTON_SOURCES.values()) if label == "cotton" else [OTHER_SOURCES[label]]
+        total = 0.0
+        for path in paths:
+            keep = ["district", "province"] if label == "orchard" else None
+            gdf = read_bbox(path, bounds, keep=keep)
+            if gdf.empty:
+                continue
+            if label == "orchard" and "district" in gdf and not row["district"]:
+                modes = gdf["district"].mode()
+                row["district"] = modes.iloc[0] if len(modes) else ""
+                pmodes = gdf["province"].mode() if "province" in gdf else []
+                row["orchard_province"] = pmodes.iloc[0] if len(pmodes) else ""
+            clipped = gpd.clip(gdf, geom)
+            clipped = clipped[~clipped.geometry.is_empty & clipped.geometry.notna()]
+            if not clipped.empty:
+                total += float(acres(clipped).sum())
+        row[f"{label}_acres"] = round(total, 1)
+    return row
+
+
+def resolve_province(orchard_province, lat):
+    """Real province where the orchard mask knows it, latitude proxy everywhere else."""
+    known = str(orchard_province or "").strip()
+    return known if known in ("Punjab", "Sindh") else ("Sindh" if lat < SINDH_LAT else "Punjab")
+
+
+def negative_score(row):
+    """Rice and maize only. Cotton is deliberately not in this score."""
+    utility = {c: min(row[f"{c}_acres"], TARGET_ACRES) / TARGET_ACRES for c in NEGATIVE_CLASSES}
+    return sum(np.sqrt(u) for u in utility.values())
+
+
+def national_counts(refresh: bool):
+    """Per-cell rice and maize acreage nationally, cached to parquet."""
+    if NATIONAL_CACHE.exists() and not refresh:
+        cached = pd.read_parquet(NATIONAL_CACHE)
+        print(f"  reusing {NATIONAL_CACHE.name} ({len(cached):,} cells)", flush=True)
+        return {(int(r.i), int(r.j)): {c: float(getattr(r, c)) for c in CLASSES}
+                for r in cached.itertuples()}
+
+    counts = {}
+    for label in NEGATIVE_CLASSES:
+        for cell, value in national_acres(label).items():
+            counts.setdefault(cell, {c: 0.0 for c in CLASSES})[label] = value
+    NATIONAL_CACHE.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame([{"i": i, "j": j, **v} for (i, j), v in counts.items()]).to_parquet(NATIONAL_CACHE)
+    return counts
+
+
+def pick_negatives(exclude, mask, refresh=False):
+    """The rice/maize cells, ranked on rice and maize alone and spread across the country."""
+    counts = national_counts(refresh)
+
+    cheap = [(cell, v) for cell, v in counts.items()
+             if sum(v[c] for c in NEGATIVE_CLASSES) >= NEG_MIN_ACRES]
+    frame = pd.DataFrame([{f"{c}_acres": v[c] for c in CLASSES} for _, v in cheap])
+    frame["score"] = frame.apply(negative_score, axis=1)
+    frame["lat"] = [(j + 0.5) * CELL_DEG for (_, j), _ in cheap]
+    ranked = frame.score.sort_values(ascending=False)
+    # Top cells nationally, plus the top cells that are unambiguously in Sindh. Without
+    # the second half the national ranking is all Punjab and the Sindh pick below has
+    # nothing to choose from.
+    order = list(ranked.index[:NEG_SHORTLIST])
+    sindh_rank = frame[frame.lat < SINDH_CERTAIN_LAT].score.sort_values(ascending=False)
+    order += [k for k in sindh_rank.index[:NEG_SHORTLIST_SINDH] if k not in order]
+
+    rows = []
+    for k in order:
+        (i, j), _ = cheap[k]
+        if f"cell_{i:04d}_{j:04d}" in exclude:
+            continue
+        rows.append(exact_cell(i, j))
+    cells = gpd.GeoDataFrame(rows, crs=4326)
+    cells["tile_id"] = [f"cell_{i:04d}_{j:04d}" for i, j in zip(cells.i, cells.j)]
+    cells = cells[~cells.geometry.intersects(mask)].copy()
+    cells["score"] = cells.apply(negative_score, axis=1).round(3)
+    cells["n_classes"] = (cells[[f"{c}_acres" for c in CLASSES]] > 0).sum(axis=1)
+    cells["province"] = [resolve_province(p, lat)
+                         for p, lat in zip(cells.orchard_province, cells.lat)]
+    cells = cells.drop(columns=["orchard_province"]).sort_values("score", ascending=False)
+
+    # One from each province before anything else. Punjab and Sindh transplant rice weeks
+    # apart, so four cells from one province would teach the model one rice curve and
+    # call it rice.
+    chosen = []
+    for province in ("Punjab", "Sindh"):
+        chosen = greedy(cells[cells.province == province], len(chosen) + 1, chosen, NEG_SEPARATION)
+    for separation in (NEG_SEPARATION, 3, 2):
+        chosen = greedy(cells, N_NEGATIVES, chosen, separation)
+        if len(chosen) >= N_NEGATIVES:
+            break
+    return cells.loc[[c.name for c in chosen]].assign(batch="negatives")
 
 
 def val_mask():
@@ -285,6 +461,11 @@ def split_batches(selected):
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--refresh", action="store_true",
+                        help="re-walk the national scans instead of using the cached counts")
+    args = parser.parse_args()
+
     print("reading sources (bbox-filtered)", flush=True)
     counts, cache, regions, districts = cheap_pass()
 
@@ -302,7 +483,8 @@ def main():
     cells["district"] = [districts.get((i, j), "") for i, j in zip(cells.i, cells.j)]
     cells["tile_id"] = [f"cell_{i:04d}_{j:04d}" for i, j in zip(cells.i, cells.j)]
 
-    keep_out = ~cells.geometry.intersects(val_mask())
+    mask = val_mask()
+    keep_out = ~cells.geometry.intersects(mask)
     print(f"dropped {int((~keep_out).sum())} cells for touching a validation AOI "
           f"(+{VAL_BUFFER_DEG} deg)", flush=True)
     cells = cells[keep_out & (cells.cotton_acres >= MIN_COTTON_ACRES)].copy()
@@ -312,7 +494,12 @@ def main():
     cells["province"] = np.where(cells.lat < SINDH_LAT, "Sindh", "Punjab")
 
     selected = split_batches(select(cells))
-    selected = selected.sort_values(["batch", "score"], ascending=[True, False])
+
+    print("\nextending the grid over the rice and fall-maize scans", flush=True)
+    negatives = pick_negatives(set(selected.tile_id), mask, refresh=args.refresh)
+    selected = pd.concat([selected, negatives], ignore_index=True)
+    selected = gpd.GeoDataFrame(selected, crs=4326).sort_values(
+        ["batch", "score"], ascending=[True, False])
 
     OUT.parent.mkdir(parents=True, exist_ok=True)
     columns = ["tile_id", "batch", "province", "district", "lon", "lat", "score",
@@ -321,15 +508,26 @@ def main():
 
     show = selected[["tile_id", "batch", "province", "district", "lon", "lat", "score"]
                     + [f"{c}_acres" for c in CLASSES]]
-    for batch in ("pilot", "extension"):
+    for batch in ("pilot", "extension", "negatives"):
         part = show[show.batch == batch]
         print(f"\n=== {batch} ({len(part)} cells) ===")
         print(part.to_string(index=False))
         totals = part[[f"{c}_acres" for c in CLASSES]].sum().round(0)
         print(f"acres: {totals.to_dict()}")
         print(f"Sindh {int((part.province == 'Sindh').sum())} / Punjab {int((part.province == 'Punjab').sum())}")
-    print(f"\nwritten: {OUT}")
+    pilot_rice = (selected[(selected.batch == "pilot") & (selected.rice_acres > 0)])
+    print(f"\nnote: the pilot's rice comes from {len(pilot_rice)} cell(s) "
+          f"({', '.join(pilot_rice.tile_id)}); the negatives batch is the real rice supply")
+    print(f"written: {OUT}")
 
 
 if __name__ == "__main__":
     main()
+    # GDAL/PROJ intermittently aborts in a C++ static destructor after main() has
+    # returned and everything is already written ("terminate called without an active
+    # exception", roughly one run in three on this box, always with no Python frame on
+    # the stack). That turns a finished run into exit 134, which a caller reads as
+    # failure. Flush and leave without running the C++ teardown.
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(0)

@@ -17,6 +17,7 @@ sixteen scattered cells would grid the whole Sindh-to-Punjab bounding box. Per-c
 gives free resumability -- a cell whose GeoTIFF already opens is skipped.
 """
 import argparse
+import os
 import sys
 import time
 from pathlib import Path
@@ -114,7 +115,7 @@ def acquire(row, workers: int):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--batch", choices=("pilot", "extension", "all"), default="pilot")
+    parser.add_argument("--batch", choices=("pilot", "extension", "negatives", "all"), default="pilot")
     parser.add_argument("--limit", type=int, default=None,
                         help="acquire only the first N cells of the batch")
     # One tile per call, so threads over tiles buy nothing; raising this only raises peak
@@ -146,4 +147,12 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    code = main()
+    # GDAL/PROJ intermittently aborts in a C++ static destructor after main() has
+    # returned and everything is already written ("terminate called without an active
+    # exception", roughly one run in three on this box, always with no Python frame on
+    # the stack). That turns a finished run into exit 134, which a caller reads as
+    # failure. Flush and leave without running the C++ teardown.
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(code)

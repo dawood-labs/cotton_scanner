@@ -24,6 +24,7 @@ Memory: one tile at a time, one raster block at a time. A 0.1 deg tile at 10 m i
 copies -- so the stack is never read whole.
 """
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -104,7 +105,7 @@ def label_raster(sources, shape, transform, crs, bounds):
     return burned
 
 
-def sample_tile(tif: Path, sources, rng, max_per_class: int) -> pd.DataFrame:
+def sample_tile(tif: Path, sources, max_per_class: int) -> pd.DataFrame:
     with rasterio.open(tif) as src:
         red_idx, nir_idx, dates = parse_band_stack(src.descriptions)
         keep = [i for i, d in enumerate(dates) if WINDOW[0] <= d <= WINDOW[1]]
@@ -112,8 +113,7 @@ def sample_tile(tif: Path, sources, rng, max_per_class: int) -> pd.DataFrame:
         penalty = get_penalty_matrix(len(dates), SMOOTH_LAMBDA, SMOOTH_ORDER)
 
         labels = label_raster(sources, (src.height, src.width), src.transform, src.crs,
-                              tuple(gpd.GeoSeries([], crs=src.crs).total_bounds) if False
-                              else _bounds_4326(src))
+                              _bounds_4326(src))
         if not (labels > 0).any():
             return pd.DataFrame()
 
@@ -133,26 +133,26 @@ def sample_tile(tif: Path, sources, rng, max_per_class: int) -> pd.DataFrame:
             denom = nir + red
             ndvi = np.full_like(red, np.nan)
             np.divide(nir - red, denom, out=ndvi, where=denom > 0)
-            del raw, denom
+            del raw, red, nir, denom
 
+            # Smooth the whole series, then cut to the model's window -- the smoother
+            # borrows from neighbouring dates, so cutting first changes the endpoints.
             smoothed = smooth_ndvi_block(ndvi, penalty, CLIP_BOUNDS, missing_value=np.nan)
             del ndvi
             flat = smoothed[keep].transpose(1, 2, 0).reshape(-1, len(keep))
             del smoothed
 
-            flat_labels = block_labels.reshape(-1)
             pick = usable.reshape(-1) & ~np.all(np.isnan(flat), axis=1)
             if not pick.any():
                 continue
 
-            xs, ys = rasterio.transform.xy(
-                src.window_transform(window),
-                *np.nonzero(usable), offset="center")
-            keep_xy = ~np.all(np.isnan(flat[usable.reshape(-1)]), axis=1)
-            lon, lat = _to_4326(np.asarray(xs)[keep_xy], np.asarray(ys)[keep_xy], src.crs)
+            picked_rows, picked_cols = np.nonzero(pick.reshape(block_labels.shape))
+            xs, ys = rasterio.transform.xy(src.window_transform(window),
+                                           picked_rows, picked_cols, offset="center")
+            lon, lat = _to_4326(xs, ys, src.crs)
 
             frame = pd.DataFrame(np.nan_to_num(flat[pick], nan=0.0), columns=columns)
-            frame["label"] = flat_labels[pick].astype("int16")
+            frame["label"] = block_labels.reshape(-1)[pick].astype("int16")
             frame["crop"] = [code_to_crop[c] for c in frame["label"]]
             frame["lon"], frame["lat"] = lon, lat
             frames.append(frame)
@@ -161,10 +161,10 @@ def sample_tile(tif: Path, sources, rng, max_per_class: int) -> pd.DataFrame:
         return pd.DataFrame()
     table = pd.concat(frames, ignore_index=True)
     table["tile"] = tif.parent.name
-    # Cap per class per tile: one national scan can cover most of a cell, and without a
-    # cap that class alone would outnumber the surveyed cotton by an order of magnitude.
-    table = table.groupby("crop", group_keys=False).apply(
-        lambda g: g.sample(min(len(g), max_per_class), random_state=0))
+    # Cap per class per tile: a national scan can cover most of a cell, and uncapped that
+    # one class would outnumber the surveyed cotton by an order of magnitude.
+    table = (table.sample(frac=1, random_state=0)
+                  .groupby("crop", group_keys=False).head(max_per_class))
     return table.reset_index(drop=True)
 
 
@@ -179,6 +179,9 @@ def _to_4326(xs, ys, crs):
     return np.asarray(lon), np.asarray(lat)
 
 
+COLUMN_ORDER_TAIL = ["label", "crop", "tile", "lon", "lat"]
+
+
 def resolve_sources(root: Path):
     return {crop: [str(root / p) for p in paths if (root / p).exists()]
             for crop, paths in SOURCES.items()}
@@ -186,7 +189,7 @@ def resolve_sources(root: Path):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--batch", choices=("pilot", "extension", "all"), default="pilot")
+    parser.add_argument("--batch", choices=("pilot", "extension", "negatives", "all"), default="pilot")
     parser.add_argument("--max-per-class", type=int, default=MAX_PER_CLASS_PER_TILE)
     parser.add_argument("--out", type=Path, default=OUT)
     args = parser.parse_args()
@@ -196,7 +199,6 @@ def main():
         cells = cells[cells.batch == args.batch]
 
     sources = resolve_sources(BASE)
-    rng = np.random.default_rng(0)
     frames = []
     for tile_id in cells.tile_id:
         tifs = sorted((RAW / tile_id).glob("sentinel_*m_tile_*.tif"))
@@ -204,7 +206,7 @@ def main():
             print(f"{tile_id}: no imagery yet, skipped", flush=True)
             continue
         for tif in tifs:
-            table = sample_tile(tif, sources, rng, args.max_per_class)
+            table = sample_tile(tif, sources, args.max_per_class)
             if table.empty:
                 print(f"{tile_id}: no labelled pixels", flush=True)
                 continue
@@ -216,6 +218,8 @@ def main():
         print("nothing sampled")
         return 1
     out = pd.concat(frames, ignore_index=True)
+    dates = [c for c in out.columns if c not in COLUMN_ORDER_TAIL]
+    out = out[dates + COLUMN_ORDER_TAIL]
     args.out.parent.mkdir(parents=True, exist_ok=True)
     out.to_parquet(args.out)
     print(f"\n{len(out):,} rows -> {args.out}")
@@ -224,4 +228,12 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    code = main()
+    # GDAL/PROJ intermittently aborts in a C++ static destructor after main() has
+    # returned and everything is already written ("terminate called without an active
+    # exception", roughly one run in three on this box, always with no Python frame on
+    # the stack). That turns a finished run into exit 134, which a caller reads as
+    # failure. Flush and leave without running the C++ teardown.
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(code)
