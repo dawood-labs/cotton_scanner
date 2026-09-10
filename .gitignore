@@ -1,0 +1,17 @@
+__pycache__/
+*.pyc
+*.tif
+*.gpkg
+*.shp
+*.dbf
+*.shx
+*.prj
+*.cpg
+*.sbn
+*.sbx
+*.qix
+*.joblib
+*.json
+!jobs.example.json
+validation_runs/
+validation_data/
