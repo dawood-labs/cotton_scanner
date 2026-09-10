@@ -102,7 +102,13 @@ def sample_one(slug: str, rng: np.random.Generator) -> pd.DataFrame:
     return table.reset_index(drop=True)
 
 
-def main(slugs):
+def main(slugs, runs_dir=None, refs_dir=None, out_dir=None):
+    global RUNS, REFS, OUT
+    # Parameterised so the same sampler serves a validation AOI and a whole district;
+    # the work is identical, only the folders differ.
+    if runs_dir: RUNS = Path(runs_dir)
+    if refs_dir: REFS = Path(refs_dir)
+    if out_dir: OUT = Path(out_dir)
     OUT.mkdir(parents=True, exist_ok=True)
     rng = np.random.default_rng(0)
     for slug in slugs:
@@ -118,5 +124,13 @@ def main(slugs):
 
 
 if __name__ == "__main__":
-    main(sys.argv[1:] or ["al_moiz_2_1", "baba_fareed_1", "baba_fareed_2",
-                          "faran_1", "layyah_1", "layyah_orchards"])
+    import argparse
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("slugs", nargs="*")
+    parser.add_argument("--runs-dir")
+    parser.add_argument("--refs-dir")
+    parser.add_argument("--out-dir")
+    args = parser.parse_args()
+    main(args.slugs or ["al_moiz_2_1", "baba_fareed_1", "baba_fareed_2",
+                        "faran_1", "layyah_1", "layyah_orchards"],
+         args.runs_dir, args.refs_dir, args.out_dir)

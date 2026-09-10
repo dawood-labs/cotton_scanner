@@ -47,10 +47,15 @@ def main():
     parser.add_argument("--models", nargs="+", required=True,
                         help="name=path pairs, e.g. v2=/path/a.joblib mined=/path/b.joblib")
     parser.add_argument("--recalls", nargs="*", type=float, default=[75, 78, 80, 83, 85])
+    parser.add_argument("--curves", type=Path, default=CURVES,
+                        help="directory of sampled per-crop curve parquets")
     parser.add_argument("--csv", type=Path, default=BASE / "validation_runs/matched_recall.csv")
     args = parser.parse_args()
 
-    tables = [pd.read_parquet(p) for p in sorted(CURVES.glob("*.parquet"))]
+    tables = [pd.read_parquet(p) for p in sorted(args.curves.glob("*.parquet"))]
+    if not tables:
+        print(f"no curve parquets under {args.curves}")
+        return 1
     pooled = pd.concat(tables, ignore_index=True)
 
     curves = {}
