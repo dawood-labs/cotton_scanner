@@ -18,5 +18,13 @@ for name in "$@"; do
         --set run_static_model=false \
         --set ndvi_worker_count=2 \
         --set delete_raw_ndvi_tiles=false
-    echo "--- $name exit=$? $(date -Is)"
+    status=$?
+    echo "--- $name exit=$status $(date -Is)"
+    # Park the run in GCS as soon as it is finished. The raw Sentinel tiles are the only
+    # expensive thing here; caching them means a changed window or model costs compute,
+    # not another download. Local copies are kept while there is room to keep them.
+    if [ $status -eq 0 ]; then
+        python /home/jovyan/FAO/cotton/cotton_scanner/scripts/gcs_cache.py push "$OUT/$name" \
+            || echo "--- $name: cache push failed, artifacts are still local"
+    fi
 done
