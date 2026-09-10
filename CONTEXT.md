@@ -133,7 +133,43 @@ Sab kuch `gs://farmdar_data_catalog/fao_cotton_scanner_cache/` mein cache hota h
 Sentinel tiles wahi cheez hain jo mehngi hain; model ya window badalne par dobara download
 nahi karna parta.
 
-## 11. Rules
+## 11. Hard negative mining — try kiya, kaam nahi aaya
+
+Har class ka aadha quota un rows se bhara jinhein model ghalat karta hai. Pehli nazar
+mein jeet lagi: cane 7.0 → 4.0, orchard 6.8 → 4.7, rice 12.0 → 11.0. Lekin recall bhi
+83.1 → 78.4. Koi bhi shy model yahi karta hai.
+
+Barabar recall par sweep karke dekha (`validation_runs/matched_recall.csv`):
+
+| recall | v2 | mined |
+|---|---|---|
+| 75% | 3.91 | 3.93 |
+| 83% | 7.14 | 7.46 |
+| 85% | 7.91 | 8.64 |
+
+Curve hili hi nahi, sirf us par jagah badli. Ek cheez hui: mined har recall par **cane
+par behtar** aur **rice par kharab** hai. User ne kaha rice priority hai, cane static
+se nikal jayega — is liye **v2 rakha, mined nahi**.
+
+## 12. Kahan tak pahuncha
+
+- cropstack ka cotton config ab **model_v2** ki taraf ishara karta hai. 81 tests pass.
+- cropstack ab model ka apna `model_card.json` parhta hai (35 dates) aur usay config ki
+  list par tarjeeh deta hai — kyunki config us waqt purani hoti hai jab model retrain
+  hota hai, aur wahi waqt hai jab guard chahiye.
+- Sab kuch `gs://farmdar_data_catalog/fao_cotton_scanner_cache/` mein cache hai.
+
+## 13. Agla kaam
+
+1. Poore Layyah district par end-to-end run. Ab tak sab chhote AOIs par hua hai.
+2. Hyperparameter tuning — shuru ki thi, rok di kyunki mined run zyada qeemti tha.
+   `--n-trials 14` se chal jayegi, ~110 min.
+3. Static model (user banayega) — cane usi se nikalna hai.
+4. Sindh ka threshold: `validation_runs/threshold_sweep.csv` mein poori curve hai.
+   Faran-1 par cut 0.6 = 67.6 recall / 10.5 rice, jabke v1 = 59.4 / 11.9. Dono taraf
+   behtar. **Number user ne dena hai.**
+
+## 14. Rules
 
 - Roman Urdu, chhota aur seedha.
 - Commits `dawoodahamd.spsc@gmail.com` ke naam se, Claude ke naam se nahi.
