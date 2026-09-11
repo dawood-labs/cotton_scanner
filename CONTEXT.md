@@ -159,7 +159,50 @@ se nikal jayega — is liye **v2 rakha, mined nahi**.
   hota hai, aur wahi waqt hai jab guard chahiye.
 - Sab kuch `gs://farmdar_data_catalog/fao_cotton_scanner_cache/` mein cache hai.
 
-## 13. Agla kaam
+## 13. Layyah district — poora run, end to end
+
+| | |
+|---|---|
+| district | 1,555,070 acres |
+| cotton mila | **117,826 acres** (7.6%) |
+| polygons | 46,543 |
+| kul waqt | **136 min** |
+
+Phase timings — aur yahi asal seekh hai:
+
+| phase | waqt | hissa |
+|---|---|---|
+| STAC download (79 tiles, 4 workers) | 111 min | **82%** |
+| RF inference (2 core) | 24 min | 18% |
+| mosaic + sieve | 7 sec | ~0 |
+| vector + export | 14 sec | ~0 |
+
+**Bottleneck CPU nahi, download hai.** Inference 20 sec/tile, download 5.5 min/tile.
+Download workers se bandha hai aur workers RAM se — `per_tile_gib = stac_tile_memory_gib
+x (tile_deg/0.1)^2`. Layyah par 4 workers ne budget ka 97% bhar rakha tha (5.8 of 6.0 GiB).
+
+Do guna core = 11 min ka faida. Do guna RAM = download aadha. **RAM chahiye, core nahi.**
+
+Meri ghalti: tuning ko "khali CPU" samajh kar download ke saath chalaya. Us ne RAM li,
+jis se download ka budget ghata aur workers 4 par ruke.
+
+Model card guard production mein chala: log mein `Model card at model_card.json pins 35
+training dates; using those`.
+
+## 14. Ghotki — chhoti tiles ka experiment
+
+0.07 deg tiles + 8 workers. RAM per tile rakbe ke murabba se ghatti hai, to aadhi RAM,
+dugne workers. Khatra: tiles 79 se ~120 ho jayengi aur har tile ka apna fixed kharcha hai.
+Layyah (6,293 km2) aur Ghotki (4,757 km2) qareeb hain, to per-km2 muqabla saaf hoga.
+
+## 15. Pod restart ka sabaq
+
+Pod dobara ban gaya (disk `nvme2n1` -> `nvme3n1`), aur `setsid nohup` waale background
+waiters bhi mar gaye. Layyah bach gaya kyunki wo mukammal ho chuka tha. **Lambi chain
+par bharosa mat karo** — har qadam ke baad state disk par honi chahiye, aur cropstack ka
+`run_mode=resume` hi asli bachao hai.
+
+## 16. Agla kaam
 
 1. Poore Layyah district par end-to-end run. Ab tak sab chhote AOIs par hua hai.
 2. Hyperparameter tuning — shuru ki thi, rok di kyunki mined run zyada qeemti tha.
